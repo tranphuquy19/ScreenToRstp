@@ -1,0 +1,19 @@
+[Unit]
+Description=Stream GNOME desktop to RTSP for Frigate
+After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
+Requires=pipewire.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/screen-to-rtsp/profile.env
+EnvironmentFile=-%h/.config/screen-to-rtsp/credentials.env
+Nice=10
+CPUWeight=50
+IOWeight=50
+ExecStart=/usr/local/bin/screen-to-rtsp
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

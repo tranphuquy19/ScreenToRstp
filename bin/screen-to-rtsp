@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""
+Stream a GNOME Wayland desktop to an RTSP server.
+
+Pipeline: org.gnome.Mutter.ScreenCast (no portal dialog)
+          → PipeWire node
+          → GStreamer (videoscale → videorate → x264enc)
+          → rtspclientsink → MediaMTX
+
+Configuration is fully via environment variables — see profiles/*.env.
+"""
+import os
+import signal
+import subprocess
+import sys
+from urllib.parse import quote, urlparse, urlunparse
+
+import gi
+
+gi.require_version("GLib", "2.0")
+gi.require_version("Gio", "2.0")
+from gi.repository import GLib, Gio
+
+
+def env(name, default):
+    v = os.environ.get(name)
+    return default if v is None or v == "" else v
+
+
+CONNECTOR    = env("SCREEN_CONNECTOR", "Virtual-1")
+RTSP_URL_RAW = env("RTSP_URL", "rtsp://localhost:8554/screen")
+RTSP_USER    = env("RTSP_USER", "")
+RTSP_PASS    = env("RTSP_PASS", "")
+WIDTH        = int(env("WIDTH", "1280"))
+HEIGHT       = int(env("HEIGHT", "720"))
+FPS          = int(env("FPS", "15"))
+BITRATE_KBPS = int(env("BITRATE_KBPS", "1500"))
+X264_PRESET  = env("X264_PRESET", "ultrafast")
+X264_THREADS = int(env("X264_THREADS", "2"))
+RTSP_LATENCY = int(env("RTSP_LATENCY_MS", "200"))
+
+
+def build_rtsp_url(url, user, password):
+    if not user:
+        return url
+    u = urlparse(url)
+    creds = f"{quote(user, safe='')}:{quote(password, safe='')}"
+    host = u.hostname or "localhost"
+    netloc = f"{creds}@{host}"
+    if u.port:
+        netloc += f":{u.port}"
+    return urlunparse(u._replace(netloc=netloc))
+
+
+RTSP_URL = build_rtsp_url(RTSP_URL_RAW, RTSP_USER, RTSP_PASS)
+RTSP_URL_LOG = build_rtsp_url(RTSP_URL_RAW, RTSP_USER, "***") if RTSP_USER else RTSP_URL_RAW
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+
+def call(dest, path, iface, method, params, reply_type):
+    return bus.call_sync(
+        dest, path, iface, method, params, reply_type,
+        Gio.DBusCallFlags.NONE, -1, None,
+    )
+
+
+session_path = call(
+    "org.gnome.Mutter.ScreenCast",
+    "/org/gnome/Mutter/ScreenCast",
+    "org.gnome.Mutter.ScreenCast",
+    "CreateSession",
+    GLib.Variant("(a{sv})", ({},)),
+    GLib.VariantType.new("(o)"),
+).unpack()[0]
+print(f"[screencast] session: {session_path}", flush=True)
+
+stream_path = call(
+    "org.gnome.Mutter.ScreenCast",
+    session_path,
+    "org.gnome.Mutter.ScreenCast.Session",
+    "RecordMonitor",
+    GLib.Variant("(sa{sv})", (CONNECTOR, {
+        "cursor-mode": GLib.Variant("u", 2),
+        # Force Mutter to emit frames at a steady rate even with no damage.
+        "frame-rate":  GLib.Variant("d", float(FPS)),
+    })),
+    GLib.VariantType.new("(o)"),
+).unpack()[0]
+print(f"[screencast] stream:  {stream_path}", flush=True)
+
+loop = GLib.MainLoop()
+proc = {"p": None}
+
+
+def on_signal(_conn, _sender, _path, _iface, signal_name, params):
+    if signal_name != "PipeWireStreamAdded":
+        return
+    node_id = params.unpack()[0]
+    print(f"[screencast] pipewire node id: {node_id}", flush=True)
+    pipeline = [
+        "gst-launch-1.0", "-q",
+        "pipewiresrc", f"path={node_id}", "do-timestamp=true",
+        "!", "video/x-raw,format=BGRx",
+        "!", "videorate",
+        "!", f"video/x-raw,framerate={FPS}/1",
+        "!", "videoscale", "method=0",
+        "!", f"video/x-raw,width={WIDTH},height={HEIGHT}",
+        "!", "videoconvert", "chroma-mode=none", "dither=0", "n-threads=2",
+        "!", "video/x-raw,format=I420",
+        "!", "queue", "max-size-buffers=4", "max-size-time=0",
+              "max-size-bytes=0", "leaky=downstream",
+        "!", "x264enc",
+            "tune=zerolatency", f"speed-preset={X264_PRESET}",
+            f"threads={X264_THREADS}", "sliced-threads=true",
+            f"bitrate={BITRATE_KBPS}", f"key-int-max={FPS*2}",
+            "byte-stream=true",
+        "!", "h264parse", "config-interval=-1",
+        "!", "rtspclientsink",
+            f"location={RTSP_URL}",
+            "protocols=tcp",
+            f"latency={RTSP_LATENCY}",
+    ]
+    print(f"[screencast] target: {RTSP_URL_LOG}", flush=True)
+    print(f"[screencast] {WIDTH}x{HEIGHT}@{FPS} {BITRATE_KBPS}kbps {X264_PRESET}", flush=True)
+    proc["p"] = subprocess.Popen(pipeline)
+
+
+bus.signal_subscribe(
+    "org.gnome.Mutter.ScreenCast", "org.gnome.Mutter.ScreenCast.Stream",
+    None, stream_path, None, Gio.DBusSignalFlags.NONE, on_signal,
+)
+
+call(
+    "org.gnome.Mutter.ScreenCast", session_path,
+    "org.gnome.Mutter.ScreenCast.Session", "Start",
+    None, GLib.VariantType.new("()"),
+)
+print("[screencast] session started", flush=True)
+
+
+def cleanup(*_):
+    print("[screencast] stopping", flush=True)
+    try:
+        if proc["p"] and proc["p"].poll() is None:
+            proc["p"].terminate()
+            try:
+                proc["p"].wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc["p"].kill()
+    finally:
+        try:
+            call(
+                "org.gnome.Mutter.ScreenCast", session_path,
+                "org.gnome.Mutter.ScreenCast.Session", "Stop",
+                None, GLib.VariantType.new("()"),
+            )
+        except GLib.Error:
+            pass
+    loop.quit()
+
+
+for s in (signal.SIGINT, signal.SIGTERM):
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, s, cleanup)
+
+try:
+    loop.run()
+finally:
+    cleanup()
+sys.exit(0)

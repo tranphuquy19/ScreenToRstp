@@ -1,0 +1,14 @@
+[Unit]
+Description=MediaMTX RTSP server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mediamtx /etc/mediamtx.yml
+Restart=on-failure
+RestartSec=2
+User=root
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
