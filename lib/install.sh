@@ -92,7 +92,7 @@ YAML
   if [[ -n $RTSP_USER ]]; then
     cat <<YAML
   - user: ${RTSP_USER}
-    pass: ${RTSP_PASS}
+    pass: "${RTSP_PASS}"
     ips: []
     permissions:
       - action: publish
