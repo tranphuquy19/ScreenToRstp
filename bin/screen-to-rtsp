@@ -104,7 +104,7 @@ def on_signal(_conn, _sender, _path, _iface, signal_name, params):
         "!", "video/x-raw,format=BGRx,pixel-aspect-ratio=1/1",
         "!", "videorate",
         "!", f"video/x-raw,framerate={FPS}/1",
-        "!", "videoscale", "method=0",
+        "!", "videoscale", "method=1",
         "!", f"video/x-raw,width={WIDTH},height={HEIGHT}",
         "!", "videoconvert", "chroma-mode=none", "dither=0", "n-threads=2",
         "!", "video/x-raw,format=I420",
