@@ -161,28 +161,17 @@ def _start_rd_keepalive():
         )
         _rd_session["path"] = rd_path
         print(f"[screencast] keepalive: rd session {rd_path}", flush=True)
-        GLib.timeout_add(500, _rd_wiggle)
+        # Fast wiggle (500 ms) during startup so pipewiresrc gets its first frame.
+        # After 3 s switch to a slower rate (2000 ms) and run forever — this
+        # ensures Mutter always has damage events and never stalls frame delivery,
+        # which would cause go2rtc/Frigate to disconnect every ~60 s.
+        GLib.timeout_add(500, _rd_wiggle_fast)
     except GLib.Error as e:
         print(f"[screencast] keepalive: failed ({e})", flush=True)
 
-def _rd_wiggle():
-    # Keep wiggling for 6 s after gst-launch is spawned so pipewiresrc can
-    # negotiate and receive its first frame before we stop generating damage.
-    if proc["p"] is not None and _rd_session.get("ticks_after", 0) >= 12:
-        if _rd_session["path"]:
-            try:
-                call(
-                    "org.gnome.Mutter.RemoteDesktop", _rd_session["path"],
-                    "org.gnome.Mutter.RemoteDesktop.Session", "Stop",
-                    None, GLib.VariantType.new("()"),
-                )
-            except GLib.Error:
-                pass
-            _rd_session["path"] = None
-            print("[screencast] keepalive: stopped (pipeline up)", flush=True)
+def _rd_wiggle(interval_ms):
+    if _rd_session["path"] is None:
         return False
-    if proc["p"] is not None:
-        _rd_session["ticks_after"] = _rd_session.get("ticks_after", 0) + 1
     try:
         for dx in (0.5, -0.5):
             call(
@@ -196,6 +185,22 @@ def _rd_wiggle():
         print(f"[screencast] keepalive: wiggle error ({e})", flush=True)
         return False
     return True
+
+_wiggle_fast_count = {"n": 0}
+
+def _rd_wiggle_fast():
+    _wiggle_fast_count["n"] += 1
+    ok = _rd_wiggle(500)
+    if not ok:
+        return False
+    if _wiggle_fast_count["n"] >= 6:
+        # Switch to slow (2 s) keepalive for steady state
+        GLib.timeout_add(2000, _rd_wiggle_slow)
+        return False
+    return True
+
+def _rd_wiggle_slow():
+    return _rd_wiggle(2000)
 
 GLib.timeout_add(200, _start_rd_keepalive)
 
