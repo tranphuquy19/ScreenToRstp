@@ -101,15 +101,15 @@ def on_signal(_conn, _sender, _path, _iface, signal_name, params):
     pipeline = [
         "gst-launch-1.0", "-q",
         "pipewiresrc", f"path={node_id}", "do-timestamp=true",
-        "!", "video/x-raw,format=BGRx",
-        "!", "videorate", "drop-only=true",
+        "!", "video/x-raw,format=BGRx,pixel-aspect-ratio=1/1",
+        "!", "videorate",
         "!", f"video/x-raw,framerate={FPS}/1",
         "!", "videoscale", "method=0",
         "!", f"video/x-raw,width={WIDTH},height={HEIGHT}",
         "!", "videoconvert", "chroma-mode=none", "dither=0", "n-threads=2",
         "!", "video/x-raw,format=I420",
-        "!", "queue", "max-size-buffers=2", "max-size-time=0",
-              "max-size-bytes=0", "leaky=upstream",
+        "!", "queue", "max-size-buffers=4", "max-size-time=0",
+              "max-size-bytes=0", "leaky=downstream",
         "!", "x264enc",
             "tune=zerolatency", f"speed-preset={X264_PRESET}",
             f"threads={X264_THREADS}", "sliced-threads=true",
@@ -119,7 +119,7 @@ def on_signal(_conn, _sender, _path, _iface, signal_name, params):
         "!", "rtspclientsink",
             f"location={RTSP_URL}",
             "protocols=tcp",
-            f"latency={RTSP_LATENCY}",
+            "latency=50",
     ]
     print(f"[screencast] target: {RTSP_URL_LOG}", flush=True)
     print(f"[screencast] {WIDTH}x{HEIGHT}@{FPS} {BITRATE_KBPS}kbps {X264_PRESET}", flush=True)
@@ -137,6 +137,67 @@ call(
     None, GLib.VariantType.new("()"),
 )
 print("[screencast] session started", flush=True)
+
+# Mutter only emits ScreenCast frames when screen has damage.  On a static
+# screen the pipeline never reaches PLAYING (pipewiresrc starves).  Work around
+# this by using the RemoteDesktop API to inject a sub-pixel pointer wiggle every
+# 2 s until the GStreamer subprocess has started (i.e. first frame received).
+_rd_session = {"path": None}
+
+def _start_rd_keepalive():
+    try:
+        rd_path = call(
+            "org.gnome.Mutter.RemoteDesktop",
+            "/org/gnome/Mutter/RemoteDesktop",
+            "org.gnome.Mutter.RemoteDesktop",
+            "CreateSession",
+            GLib.Variant("()", ()),
+            GLib.VariantType.new("(o)"),
+        ).unpack()[0]
+        call(
+            "org.gnome.Mutter.RemoteDesktop", rd_path,
+            "org.gnome.Mutter.RemoteDesktop.Session", "Start",
+            None, GLib.VariantType.new("()"),
+        )
+        _rd_session["path"] = rd_path
+        print(f"[screencast] keepalive: rd session {rd_path}", flush=True)
+        GLib.timeout_add(500, _rd_wiggle)
+    except GLib.Error as e:
+        print(f"[screencast] keepalive: failed ({e})", flush=True)
+
+def _rd_wiggle():
+    # Keep wiggling for 6 s after gst-launch is spawned so pipewiresrc can
+    # negotiate and receive its first frame before we stop generating damage.
+    if proc["p"] is not None and _rd_session.get("ticks_after", 0) >= 12:
+        if _rd_session["path"]:
+            try:
+                call(
+                    "org.gnome.Mutter.RemoteDesktop", _rd_session["path"],
+                    "org.gnome.Mutter.RemoteDesktop.Session", "Stop",
+                    None, GLib.VariantType.new("()"),
+                )
+            except GLib.Error:
+                pass
+            _rd_session["path"] = None
+            print("[screencast] keepalive: stopped (pipeline up)", flush=True)
+        return False
+    if proc["p"] is not None:
+        _rd_session["ticks_after"] = _rd_session.get("ticks_after", 0) + 1
+    try:
+        for dx in (0.5, -0.5):
+            call(
+                "org.gnome.Mutter.RemoteDesktop", _rd_session["path"],
+                "org.gnome.Mutter.RemoteDesktop.Session",
+                "NotifyPointerMotionRelative",
+                GLib.Variant("(dd)", (dx, 0.0)),
+                GLib.VariantType.new("()"),
+            )
+    except GLib.Error as e:
+        print(f"[screencast] keepalive: wiggle error ({e})", flush=True)
+        return False
+    return True
+
+GLib.timeout_add(200, _start_rd_keepalive)
 
 
 def cleanup(*_):
