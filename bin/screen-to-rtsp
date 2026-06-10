@@ -161,15 +161,16 @@ def _start_rd_keepalive():
         )
         _rd_session["path"] = rd_path
         print(f"[screencast] keepalive: rd session {rd_path}", flush=True)
-        # Fast wiggle (500 ms) during startup so pipewiresrc gets its first frame.
-        # After 3 s switch to a slower rate (2000 ms) and run forever — this
-        # ensures Mutter always has damage events and never stalls frame delivery,
-        # which would cause go2rtc/Frigate to disconnect every ~60 s.
-        GLib.timeout_add(500, _rd_wiggle_fast)
+        # Wiggle at 40 ms = one damage event per frame period (25 fps).
+        # Without this, Mutter only pushes frames when there is real screen
+        # damage, so on an idle desktop videorate starves, then dumps a huge
+        # burst of duplicated frames that overflows the 4-buffer queue and
+        # the encoder only sees the last 4 of ~50, causing visible stuttering.
+        GLib.timeout_add(40, _rd_wiggle)
     except GLib.Error as e:
         print(f"[screencast] keepalive: failed ({e})", flush=True)
 
-def _rd_wiggle(interval_ms):
+def _rd_wiggle():
     if _rd_session["path"] is None:
         return False
     try:
@@ -185,22 +186,6 @@ def _rd_wiggle(interval_ms):
         print(f"[screencast] keepalive: wiggle error ({e})", flush=True)
         return False
     return True
-
-_wiggle_fast_count = {"n": 0}
-
-def _rd_wiggle_fast():
-    _wiggle_fast_count["n"] += 1
-    ok = _rd_wiggle(500)
-    if not ok:
-        return False
-    if _wiggle_fast_count["n"] >= 6:
-        # Switch to slow (2 s) keepalive for steady state
-        GLib.timeout_add(2000, _rd_wiggle_slow)
-        return False
-    return True
-
-def _rd_wiggle_slow():
-    return _rd_wiggle(2000)
 
 GLib.timeout_add(200, _start_rd_keepalive)
 
