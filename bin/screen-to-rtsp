@@ -125,6 +125,13 @@ def on_signal(_conn, _sender, _path, _iface, signal_name, params):
     print(f"[screencast] {WIDTH}x{HEIGHT}@{FPS} {BITRATE_KBPS}kbps {X264_PRESET}", flush=True)
     proc["p"] = subprocess.Popen(pipeline)
 
+    def _on_gst_exit(pid, _wait_status):
+        print(f"[screencast] gst-launch exited (pid={pid}), triggering restart", flush=True)
+        _exit_code[0] = 1
+        loop.quit()
+
+    GLib.child_watch_add(GLib.PRIORITY_DEFAULT, proc["p"].pid, _on_gst_exit)
+
 
 bus.signal_subscribe(
     "org.gnome.Mutter.ScreenCast", "org.gnome.Mutter.ScreenCast.Stream",
@@ -214,8 +221,10 @@ def cleanup(*_):
 for s in (signal.SIGINT, signal.SIGTERM):
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, s, cleanup)
 
+_exit_code = [0]
+
 try:
     loop.run()
 finally:
     cleanup()
-sys.exit(0)
+sys.exit(_exit_code[0])
