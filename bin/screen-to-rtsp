@@ -81,9 +81,12 @@ stream_path = call(
     "org.gnome.Mutter.ScreenCast.Session",
     "RecordMonitor",
     GLib.Variant("(sa{sv})", (CONNECTOR, {
-        "cursor-mode": GLib.Variant("u", 2),
-        # Force Mutter to emit frames at a steady rate even with no damage.
-        "frame-rate":  GLib.Variant("d", float(FPS)),
+        # mode 1 = embedded: cursor is drawn into each video frame.
+        # With mode 2 (metadata) the cursor is NOT in the pixels, so a
+        # static screen + sub-pixel pointer wiggle produces identical frames
+        # every tick — Mutter skips sending them, pipewiresrc starves, and
+        # videorate bursts duplicated frames → visible stutter and repeats.
+        "cursor-mode": GLib.Variant("u", 1),
     })),
     GLib.VariantType.new("(o)"),
 ).unpack()[0]
@@ -181,7 +184,7 @@ def _rd_wiggle():
     if _rd_session["path"] is None:
         return False
     try:
-        for dx in (0.5, -0.5):
+        for dx in (1.0, -1.0):
             call(
                 "org.gnome.Mutter.RemoteDesktop", _rd_session["path"],
                 "org.gnome.Mutter.RemoteDesktop.Session",
